@@ -1,23 +1,23 @@
+#!/bin/bash
+set -e
 
-# Verifica que estemos en un repo Git
+BASE_BRANCH="main"
+SOURCE_BRANCH="Ejemplo1"
+LIMIT=2000
+
+# Validaciones iniciales
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
   echo "❌ No estás en un repositorio Git válido."
   exit 1
 fi
-
-# Verifica que exista la rama fuente
 if ! git rev-parse --verify "$SOURCE_BRANCH" &>/dev/null; then
   echo "❌ La rama '$SOURCE_BRANCH' no existe."
   exit 1
 fi
 
-# Calcula el commit base
+# Punto base y lista de commits (sin merges)
 BASE_COMMIT=$(git merge-base "$BASE_BRANCH" "$SOURCE_BRANCH")
-echo "📍 Punto base: $BASE_COMMIT"
-
-# Lista **solo commits no-merges** en orden cronológico
 COMMITS=($(git rev-list --reverse --no-merges "$BASE_COMMIT".."$SOURCE_BRANCH"))
-echo "🔍 Commits (sin merges) encontrados: ${#COMMITS[@]}"
 
 GROUP=()
 GROUP_TOTAL=0
@@ -25,54 +25,62 @@ GROUP_NUM=1
 PREV_BRANCH=""
 
 for COMMIT in "${COMMITS[@]}"; do
-  # Cuenta líneas modificadas en este commit
+  # Cuenta líneas modificadas
   LINES=$(git show --numstat --format="" "$COMMIT" \
     | awk '{ add += $1; del += $2 } END { print add + del }')
   LINES=${LINES:-0}
 
-  # Si excede el límite, crea la rama con el grupo actual
   if (( GROUP_TOTAL + LINES > LIMIT )); then
     BRANCH_NAME="${SOURCE_BRANCH}-parte-${GROUP_NUM}"
-    echo "🚀 Creando rama $BRANCH_NAME con $GROUP_TOTAL líneas..."
+    echo "🚀 Creando rama $BRANCH_NAME con $GROUP_TOTAL líneas…"
 
-    # Crea la rama desde el último punto (base o prev)
+    # Crea rama desde base o desde la anterior
     if [[ -z "$PREV_BRANCH" ]]; then
       git branch "$BRANCH_NAME" "$BASE_COMMIT"
     else
       git branch "$BRANCH_NAME" "$PREV_BRANCH"
     fi
-
-    # Aplica los commits acumulados
     git checkout "$BRANCH_NAME"
+
+    # Aplica cada commit, saltando los que fallen
     for C in "${GROUP[@]}"; do
-      git cherry-pick "$C"
+      echo "- cherry-pick $C"
+      if ! git cherry-pick "$C" &>/dev/null; then
+        echo "  ⚠️  No se pudo aplicar $C, omitiendo."
+        git cherry-pick --abort &>/dev/null
+      fi
     done
 
     PREV_BRANCH="$BRANCH_NAME"
-    GROUP=()
-    GROUP_TOTAL=0
-    GROUP_NUM=$((GROUP_NUM + 1))
+    GROUP=(); GROUP_TOTAL=0; ((GROUP_NUM++))
+
+    # Volvemos a rama fuente solo para seguir agrupando, sin aplicar nada ahí
+    git checkout "$SOURCE_BRANCH" &>/dev/null
   fi
 
   GROUP+=("$COMMIT")
   GROUP_TOTAL=$((GROUP_TOTAL + LINES))
 done
 
-# Crea la última rama si quedan commits
+# Último grupo pendiente
 if (( ${#GROUP[@]} > 0 )); then
   BRANCH_NAME="${SOURCE_BRANCH}-parte-${GROUP_NUM}"
-  echo "🚀 Creando rama $BRANCH_NAME con $GROUP_TOTAL líneas..."
+  echo "🚀 Creando rama $BRANCH_NAME con $GROUP_TOTAL líneas…"
 
   if [[ -z "$PREV_BRANCH" ]]; then
     git branch "$BRANCH_NAME" "$BASE_COMMIT"
   else
     git branch "$BRANCH_NAME" "$PREV_BRANCH"
   fi
-
   git checkout "$BRANCH_NAME"
+
   for C in "${GROUP[@]}"; do
-    git cherry-pick "$C"
+    echo "- cherry-pick $C"
+    if ! git cherry-pick "$C" &>/dev/null; then
+      echo "  ⚠️  No se pudo aplicar $C, omitiendo."
+      git cherry-pick --abort &>/dev/null
+    fi
   done
 fi
 
-echo "✅ Proceso completado. Se crearon $GROUP_NUM ramas desde '$SOURCE_BRANCH'."
+echo "✅ División completada: se crearon $GROUP_NUM ramas desde '$SOURCE_BRANCH'."
