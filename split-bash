@@ -1,57 +1,54 @@
-#!/bin/bash
-set -e
 
-BASE_BRANCH="main"
-SOURCE_BRANCH="Ejemplo1"
-LIMIT=2000
-
+# Verifica que estemos en un repo Git
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
   echo "❌ No estás en un repositorio Git válido."
   exit 1
 fi
 
+# Verifica que exista la rama fuente
 if ! git rev-parse --verify "$SOURCE_BRANCH" &>/dev/null; then
   echo "❌ La rama '$SOURCE_BRANCH' no existe."
   exit 1
 fi
 
+# Calcula el commit base
 BASE_COMMIT=$(git merge-base "$BASE_BRANCH" "$SOURCE_BRANCH")
 echo "📍 Punto base: $BASE_COMMIT"
 
-COMMITS=($(git rev-list --reverse "$BASE_COMMIT".."$SOURCE_BRANCH"))
-echo "🔍 Commits encontrados: ${#COMMITS[@]}"
+# Lista **solo commits no-merges** en orden cronológico
+COMMITS=($(git rev-list --reverse --no-merges "$BASE_COMMIT".."$SOURCE_BRANCH"))
+echo "🔍 Commits (sin merges) encontrados: ${#COMMITS[@]}"
 
 GROUP=()
 GROUP_TOTAL=0
 GROUP_NUM=1
-
-# Esta variable guardará la rama anterior para partir de ella
 PREV_BRANCH=""
 
 for COMMIT in "${COMMITS[@]}"; do
-  LINES=$(git show --numstat --format="" "$COMMIT" | awk '{ add += $1; del += $2 } END { print add + del }')
+  # Cuenta líneas modificadas en este commit
+  LINES=$(git show --numstat --format="" "$COMMIT" \
+    | awk '{ add += $1; del += $2 } END { print add + del }')
   LINES=${LINES:-0}
 
+  # Si excede el límite, crea la rama con el grupo actual
   if (( GROUP_TOTAL + LINES > LIMIT )); then
     BRANCH_NAME="${SOURCE_BRANCH}-parte-${GROUP_NUM}"
     echo "🚀 Creando rama $BRANCH_NAME con $GROUP_TOTAL líneas..."
 
+    # Crea la rama desde el último punto (base o prev)
     if [[ -z "$PREV_BRANCH" ]]; then
-      # Primera rama, parte desde BASE_COMMIT
       git branch "$BRANCH_NAME" "$BASE_COMMIT"
     else
-      # Siguientes ramas parten de la anterior
       git branch "$BRANCH_NAME" "$PREV_BRANCH"
     fi
 
+    # Aplica los commits acumulados
     git checkout "$BRANCH_NAME"
-
     for C in "${GROUP[@]}"; do
       git cherry-pick "$C"
     done
 
     PREV_BRANCH="$BRANCH_NAME"
-
     GROUP=()
     GROUP_TOTAL=0
     GROUP_NUM=$((GROUP_NUM + 1))
@@ -61,6 +58,7 @@ for COMMIT in "${COMMITS[@]}"; do
   GROUP_TOTAL=$((GROUP_TOTAL + LINES))
 done
 
+# Crea la última rama si quedan commits
 if (( ${#GROUP[@]} > 0 )); then
   BRANCH_NAME="${SOURCE_BRANCH}-parte-${GROUP_NUM}"
   echo "🚀 Creando rama $BRANCH_NAME con $GROUP_TOTAL líneas..."
@@ -72,7 +70,6 @@ if (( ${#GROUP[@]} > 0 )); then
   fi
 
   git checkout "$BRANCH_NAME"
-
   for C in "${GROUP[@]}"; do
     git cherry-pick "$C"
   done
