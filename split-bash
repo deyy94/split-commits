@@ -5,60 +5,71 @@ BASE_BRANCH="main"
 SOURCE_BRANCH="Ejemplo1"
 LIMIT=2000
 
-# 1) Validaciones básicas
+# 1) Validar que estemos en un repo Git y que SOURCE_BRANCH exista
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
   echo "❌ No estás en un repositorio Git."
   exit 1
 fi
 if ! git rev-parse --verify "$SOURCE_BRANCH" &>/dev/null; then
-  echo "❌ No existe la rama $SOURCE_BRANCH."
+  echo "❌ La rama '$SOURCE_BRANCH' no existe."
   exit 1
 fi
 
-# 2) Calcula el punto base y la lista de commits (sin merges)
+# 2) Detectar el punto donde SOURCE_BRANCH diverge de BASE_BRANCH
 BASE_COMMIT=$(git merge-base "$BASE_BRANCH" "$SOURCE_BRANCH")
-COMMITS=($(git rev-list --reverse --no-merges "$BASE_COMMIT".."$SOURCE_BRANCH"))
+echo "📍 Punto base de '$SOURCE_BRANCH': $BASE_COMMIT"
 
-# 3) Fase A: agrupa hashes en lotes ≤ LIMIT líneas
+# 3) Listar todos los commits en orden (cronológico) sin merges
+COMMITS=( $(git rev-list --reverse --no-merges "$BASE_COMMIT".."$SOURCE_BRANCH") )
+echo "🔍 Total de commits a procesar: ${#COMMITS[@]}"
+
+# 4) Agrupar hashes de commits en lotes de ≤ LINE_LIMIT líneas
 declare -a GROUPS
-declare -a CURR
+declare -a CURR_GROUP
 CURR_SUM=0
 
 for C in "${COMMITS[@]}"; do
-  LINES=$(git show --numstat --format="" "$C" \
-    | awk '{add+=$1;del+=$2} END{print add+del}')
+  # contar líneas modificadas (insertadas + eliminadas) en el commit
+  LINES=$(git show --numstat --format="" "$C" | awk '{a+=$1; d+=$2} END{print a+d}')
   LINES=${LINES:-0}
 
-  if (( CURR_SUM + LINES > LIMIT )); then
-    GROUPS+=("$(printf "%s " "${CURR[@]}")")
-    CURR=(); CURR_SUM=0
+  # si agregar este commit supera el límite, cerramos el grupo actual
+  if (( CURR_SUM + LINES > LINE_LIMIT )); then
+    GROUPS+=("$(printf "%s " "${CURR_GROUP[@]}")")
+    CURR_GROUP=(); CURR_SUM=0
   fi
 
-  CURR+=("$C")
+  # añadir commit al grupo
+  CURR_GROUP+=("$C")
   CURR_SUM=$((CURR_SUM + LINES))
 done
+
+# añadir el último grupo si no está vacío
 if (( CURR_SUM > 0 )); then
-  GROUPS+=("$(printf "%s " "${CURR[@]}")")
+  GROUPS+=("$(printf "%s " "${CURR_GROUP[@]}")")
 fi
 
-echo "🔍 Se formaron ${#GROUPS[@]} grupos de commits."
+echo "✅ Se formaron ${#GROUPS[@]} grupos de commits."
 
-# 4) Fase B: crea cada rama y cherry-pick del grupo
+# 5) Para cada grupo, crear una rama nueva y cherry-pick de sus commits
 i=1
 for G in "${GROUPS[@]}"; do
-  BR="${SOURCE_BRANCH}-parte-${i}"
-  echo "🚀 Rama $BR con commits: $G"
-  git branch "$BR" "$BASE_COMMIT"
-  git checkout "$BR"
+  NEW_BRANCH="${SOURCE_BRANCH}-parte-${i}"
+  echo "🚀 Creando '$NEW_BRANCH' con ${#G[@]} commits…"
 
+  # crear la rama desde BASE_COMMIT
+  git branch "$NEW_BRANCH" "$BASE_COMMIT"
+  git checkout "$NEW_BRANCH"
+
+  # aplicar cada commit del grupo (omitiendo conflictos)
   for H in $G; do
     if ! git cherry-pick "$H" &>/dev/null; then
-      echo "  ⚠️ Omitiendo $H (conflicto)."
+      echo "   ⚠️ Omitido $H (conflicto o error)."
       git cherry-pick --abort &>/dev/null
     fi
   done
 
-  i=$((i+1))
+  ((i++))
 done
 
-echo "✅ Terminado: se crearon $((i-1)) ramas."
+echo "🎉 ¡Hecho! Se crearon $((i-1)) ramas desde '$SOURCE_BRANCH'."
