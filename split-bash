@@ -5,82 +5,60 @@ BASE_BRANCH="main"
 SOURCE_BRANCH="Ejemplo1"
 LIMIT=2000
 
-# Validaciones iniciales
+# 1) Validaciones básicas
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-  echo "❌ No estás en un repositorio Git válido."
+  echo "❌ No estás en un repositorio Git."
   exit 1
 fi
 if ! git rev-parse --verify "$SOURCE_BRANCH" &>/dev/null; then
-  echo "❌ La rama '$SOURCE_BRANCH' no existe."
+  echo "❌ No existe la rama $SOURCE_BRANCH."
   exit 1
 fi
 
-# Punto base y lista de commits (sin merges)
+# 2) Calcula el punto base y la lista de commits (sin merges)
 BASE_COMMIT=$(git merge-base "$BASE_BRANCH" "$SOURCE_BRANCH")
 COMMITS=($(git rev-list --reverse --no-merges "$BASE_COMMIT".."$SOURCE_BRANCH"))
 
-GROUP=()
-GROUP_TOTAL=0
-GROUP_NUM=1
-PREV_BRANCH=""
+# 3) Fase A: agrupa hashes en lotes ≤ LIMIT líneas
+declare -a GROUPS
+declare -a CURR
+CURR_SUM=0
 
-for COMMIT in "${COMMITS[@]}"; do
-  # Cuenta líneas modificadas
-  LINES=$(git show --numstat --format="" "$COMMIT" \
-    | awk '{ add += $1; del += $2 } END { print add + del }')
+for C in "${COMMITS[@]}"; do
+  LINES=$(git show --numstat --format="" "$C" \
+    | awk '{add+=$1;del+=$2} END{print add+del}')
   LINES=${LINES:-0}
 
-  if (( GROUP_TOTAL + LINES > LIMIT )); then
-    BRANCH_NAME="${SOURCE_BRANCH}-parte-${GROUP_NUM}"
-    echo "🚀 Creando rama $BRANCH_NAME con $GROUP_TOTAL líneas…"
-
-    # Crea rama desde base o desde la anterior
-    if [[ -z "$PREV_BRANCH" ]]; then
-      git branch "$BRANCH_NAME" "$BASE_COMMIT"
-    else
-      git branch "$BRANCH_NAME" "$PREV_BRANCH"
-    fi
-    git checkout "$BRANCH_NAME"
-
-    # Aplica cada commit, saltando los que fallen
-    for C in "${GROUP[@]}"; do
-      echo "- cherry-pick $C"
-      if ! git cherry-pick "$C" &>/dev/null; then
-        echo "  ⚠️  No se pudo aplicar $C, omitiendo."
-        git cherry-pick --abort &>/dev/null
-      fi
-    done
-
-    PREV_BRANCH="$BRANCH_NAME"
-    GROUP=(); GROUP_TOTAL=0; ((GROUP_NUM++))
-
-    # Volvemos a rama fuente solo para seguir agrupando, sin aplicar nada ahí
-    git checkout "$SOURCE_BRANCH" &>/dev/null
+  if (( CURR_SUM + LINES > LIMIT )); then
+    GROUPS+=("$(printf "%s " "${CURR[@]}")")
+    CURR=(); CURR_SUM=0
   fi
 
-  GROUP+=("$COMMIT")
-  GROUP_TOTAL=$((GROUP_TOTAL + LINES))
+  CURR+=("$C")
+  CURR_SUM=$((CURR_SUM + LINES))
 done
+if (( CURR_SUM > 0 )); then
+  GROUPS+=("$(printf "%s " "${CURR[@]}")")
+fi
 
-# Último grupo pendiente
-if (( ${#GROUP[@]} > 0 )); then
-  BRANCH_NAME="${SOURCE_BRANCH}-parte-${GROUP_NUM}"
-  echo "🚀 Creando rama $BRANCH_NAME con $GROUP_TOTAL líneas…"
+echo "🔍 Se formaron ${#GROUPS[@]} grupos de commits."
 
-  if [[ -z "$PREV_BRANCH" ]]; then
-    git branch "$BRANCH_NAME" "$BASE_COMMIT"
-  else
-    git branch "$BRANCH_NAME" "$PREV_BRANCH"
-  fi
-  git checkout "$BRANCH_NAME"
+# 4) Fase B: crea cada rama y cherry-pick del grupo
+i=1
+for G in "${GROUPS[@]}"; do
+  BR="${SOURCE_BRANCH}-parte-${i}"
+  echo "🚀 Rama $BR con commits: $G"
+  git branch "$BR" "$BASE_COMMIT"
+  git checkout "$BR"
 
-  for C in "${GROUP[@]}"; do
-    echo "- cherry-pick $C"
-    if ! git cherry-pick "$C" &>/dev/null; then
-      echo "  ⚠️  No se pudo aplicar $C, omitiendo."
+  for H in $G; do
+    if ! git cherry-pick "$H" &>/dev/null; then
+      echo "  ⚠️ Omitiendo $H (conflicto)."
       git cherry-pick --abort &>/dev/null
     fi
   done
-fi
 
-echo "✅ División completada: se crearon $GROUP_NUM ramas desde '$SOURCE_BRANCH'."
+  i=$((i+1))
+done
+
+echo "✅ Terminado: se crearon $((i-1)) ramas."
